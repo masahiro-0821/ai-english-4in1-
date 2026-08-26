@@ -1,91 +1,249 @@
-
 import express from "express";
 import dotenv from "dotenv";
+
 dotenv.config();
 
 const app = express();
-app.use(express.json({ limit: "2mb" }));
-app.use(express.text({ type: ["text/plain", "application/sdp"], limit: "2mb" }));
+
+app.use(
+  express.text({
+    type: ["application/sdp", "text/plain"],
+    limit: "2mb",
+  })
+);
+
 app.use(express.static("public"));
 
-const OPENAI = "https://api.openai.com/v1";
+const OPENAI_URL = "https://api.openai.com/v1";
 
 app.post("/api/realtime-call", async (req, res) => {
   try {
-    if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY が設定されていません");
+    const apiKey = process.env.OPENAI_API_KEY;
 
-    const sdp = typeof req.body === "string" ? req.body : req.body?.sdp;
-    const scene = String(req.query.scene || "hotel check-in").slice(0, 300);
-    const level = String(req.query.level || "NORMAL").slice(0, 30);
-    if (!sdp) return res.status(400).send("SDP offer is required");
+    if (!apiKey) {
+      return res.status(500).json({
+        error: "OPENAI_API_KEY is not configured on Render.",
+      });
+    }
+
+    const sdp = req.body;
+
+    if (!sdp || typeof sdp !== "string") {
+      return res.status(400).json({
+        error: "SDP offer is missing.",
+      });
+    }
 
     const instructions = `
-You are an interactive English conversation partner for a Japanese beginner.
-Current role-play scene: ${scene}
-Difficulty: ${level}
+You are a natural interactive English conversation partner
+for a Japanese English learner.
 
-ABSOLUTE RULES:
-- Stay in character during role-play. For hotel check-in, act as hotel front-desk staff.
-- Speak mostly in English during role-play.
-- Do NOT correct grammar while role-play is active if meaning is understandable.
-- Keep replies short and conversational, usually 1-2 sentences.
-- Let the user interrupt you naturally. If the user starts speaking while you are talking, stop and listen.
-- If the user says "stop", "wait", "ちょっと", or similar, stop immediately and wait.
-- If the user says "slower", "speak slowly", or "ゆっくり", speak more slowly from then on.
-- If the user says "faster", "more faster", or "もっと早く", increase speaking speed naturally.
-- If the user says "repeat", "say that again", or "もう一度", repeat your previous point.
-- Never lecture unless the user explicitly asks for feedback.
-- For hotel check-in, naturally help the user complete:
-  1) state that they have a reservation,
-  2) ask breakfast time,
-  3) ask check-out time.
-- Once all goals are achieved, briefly say "MISSION COMPLETE", then only:
-  GOOD: one short strength
-  NEXT: at most two points
-  BETTER ENGLISH: one or two improved phrases
-- Understand Japanese operational instructions.
-- Prioritize smooth turn-taking and low latency.
+ROLE:
+You are currently acting as a hotel front-desk receptionist.
+
+MAIN GOAL:
+Create a natural spoken hotel check-in conversation.
+
+MISSION GOALS:
+1. The learner says they have a reservation.
+2. Complete a natural check-in exchange.
+3. The learner asks what time breakfast starts.
+4. The learner asks what time check-out is.
+
+CONVERSATION STYLE:
+- Speak mainly in English.
+- Keep responses short.
+- Usually say only one or two sentences.
+- Sound like a real hotel receptionist.
+- Do not lecture during the role-play.
+- Do not constantly correct grammar.
+- If the learner's meaning is understandable, continue naturally.
+- Give hints only when requested.
+
+INTERRUPTION BEHAVIOR:
+- The learner must be able to interrupt you at any time.
+- If the learner starts speaking while you are speaking,
+  immediately stop and listen.
+- Never require the learner to wait until you finish speaking.
+- Treat interruptions as normal human conversation.
+
+VOICE COMMANDS:
+If the learner says:
+"Stop"
+"Wait"
+"ちょっと"
+then stop immediately.
+
+If the learner says:
+"Speak slowly"
+"Slower"
+"Slow down"
+"ゆっくり"
+then speak more slowly afterward.
+
+If the learner says:
+"Faster"
+"Speak faster"
+"もっと早く"
+then speak faster afterward.
+
+If the learner says:
+"Repeat"
+"Again"
+"Say that again"
+"もう一度"
+then repeat your previous message.
+
+LANGUAGE:
+- Understand both English and Japanese.
+- Operational instructions may be spoken in Japanese.
+- During role-play, respond mainly in English.
+
+MISSION COMPLETE:
+Only after all mission goals are achieved, say:
+
+MISSION COMPLETE
+
+Then briefly provide:
+
+GOOD:
+one positive point
+
+NEXT:
+maximum two improvement points
+
+BETTER ENGLISH:
+one or two more natural English expressions
+
+Then stop unless the learner wants to continue.
+
+The highest priority is:
+natural low-latency speech,
+smooth turn-taking,
+and interruption-friendly conversation.
 `;
 
     const session = {
       type: "realtime",
       model: "gpt-realtime-2.1-mini",
+
       output_modalities: ["audio"],
+
       instructions,
+
       max_output_tokens: 700,
+
       audio: {
         input: {
           turn_detection: {
             type: "semantic_vad",
             create_response: true,
-            interrupt_response: true
-          }
+            interrupt_response: true,
+          },
         },
-        output: { voice: "marin" }
-      }
+
+        output: {
+          voice: "marin",
+        },
+      },
     };
 
-    const r = await fetch(`${OPENAI}/realtime/calls`, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ sdp, session })
-    });
+    /*
+      OpenAI公式仕様：
+      multipart/form-data
 
-    const answer = await r.text();
-    if (!r.ok) return res.status(r.status).send(answer);
-    res.type("application/sdp").send(answer);
-  } catch (e) {
-    console.error(e);
-    res.status(500).send(e.message);
+      part 1:
+        name = sdp
+        Content-Type = application/sdp
+
+      part 2:
+        name = session
+        Content-Type = application/json
+    */
+
+    const boundary =
+      "----OpenAIRealtimeBoundary" +
+      Date.now().toString(16);
+
+    const multipartBody =
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="sdp"; filename="offer.sdp"\r\n` +
+      `Content-Type: application/sdp\r\n\r\n` +
+      sdp +
+      `\r\n` +
+
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="session"\r\n` +
+      `Content-Type: application/json\r\n\r\n` +
+      JSON.stringify(session) +
+      `\r\n` +
+
+      `--${boundary}--\r\n`;
+
+    const openaiResponse = await fetch(
+      `${OPENAI_URL}/realtime/calls`,
+      {
+        method: "POST",
+
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type":
+            `multipart/form-data; boundary=${boundary}`,
+        },
+
+        body: multipartBody,
+      }
+    );
+
+    const responseBody =
+      await openaiResponse.text();
+
+    if (!openaiResponse.ok) {
+      console.error(
+        "OpenAI Realtime error:",
+        openaiResponse.status,
+        responseBody
+      );
+
+      return res
+        .status(openaiResponse.status)
+        .send(responseBody);
+    }
+
+    res
+      .status(201)
+      .type("application/sdp")
+      .send(responseBody);
+
+  } catch (error) {
+    console.error(
+      "Realtime server error:",
+      error
+    );
+
+    res.status(500).json({
+      error:
+        error?.message ||
+        "Realtime connection failed.",
+    });
   }
 });
 
+
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, realtimeModel: "gpt-realtime-2.1-mini" });
+  res.json({
+    ok: true,
+    model: "gpt-realtime-2.1-mini",
+    realtime: true,
+  });
 });
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`AI English Realtime running on ${port}`));
+
+const PORT =
+  process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(
+    `AI English Realtime running on port ${PORT}`
+  );
+});

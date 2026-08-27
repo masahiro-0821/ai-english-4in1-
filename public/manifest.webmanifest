@@ -1,0 +1,8 @@
+{
+  "name": "AI English 4-in-1",
+  "short_name": "AI English",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#07101c",
+  "theme_color": "#0b1020"
+}
